@@ -1,0 +1,224 @@
+import gradio as gr
+import PIL.Image
+import base64
+import os
+from deep_translator import GoogleTranslator
+import google.generativeai as genai
+from langchain_community.vectorstores import Chroma
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from upload_docs import upload_loader_func
+from response import articulation_messages_func
+from tempfile import mkdtemp
+from webloader import web_upload_loader_func
+import evaluate
+
+# Set Google API key securely
+os.environ['GOOGLE_API_KEY'] = "AIzaSyDwIEycJiORGYfDdzFpsE6VrtM_F8bmtLw"  # Replace with your actual API key
+genai.configure(api_key=os.environ['GOOGLE_API_KEY'])
+
+# Create the Models
+txt_model = genai.GenerativeModel('gemini-pro')
+vis_model = genai.GenerativeModel('gemini-pro-vision')
+
+def image_to_base64(image_path):
+    try:
+        with open(image_path, 'rb') as img:
+            encoded_string = base64.b64encode(img.read())
+        return encoded_string.decode('utf-8')
+    except Exception as e:
+        print(f"Error converting image to base64: {e}")
+        return None
+
+def add_query_to_history(history, txt, img_path, pdf_path,url_path):
+    if not img_path and not pdf_path and not url_path:
+        history.append((txt, None))
+    elif img_path:
+        base64_str = image_to_base64(img_path)
+        if base64_str:
+            data_url = f"data:image/jpeg;base64,{base64_str}"
+            history.append((f"{txt} ![]({data_url})", None))
+        else:
+            history.append((txt, "Error processing image"))
+    elif pdf_path:
+        history.append((f"{txt} (PDF uploaded: {pdf_path})", None))
+    elif url_path:
+        history.append((f"{txt} (URL uploaded: {url_path})", None))
+    return history
+
+def translate_text(text, target_language):
+    if target_language == "en":
+        return text
+    try:
+        translated = GoogleTranslator(source='auto', target=target_language).translate(text)
+        return translated
+    except Exception as e:
+        print(f"Error translating text: {e}")
+        return text
+
+def generate_llm_response(history, text, img_path, pdf_path,target_language, app_functionality,url_path):
+    try:
+        if app_functionality == "Chatbot":
+            return handle_chatbot(history, text, target_language)
+        elif app_functionality == "RAG-GPT":
+            return handle_rag_gpt(history, text,pdf_path, target_language)
+        elif app_functionality == "Vision-Chatbot":
+            return handle_vision_chatbot(history, text, img_path, target_language)
+        elif app_functionality == "Preloaded-Document-Generation":
+            return handle_preloaded_document_generation(history, text,target_language)
+        elif app_functionality == "Web-Rag-GPT":
+            return handle_web_rag_gpt(history, text,url_path, target_language)
+    except Exception as e:
+        history.append((None, f"Error generating response: {e}"))
+        return history
+
+def handle_chatbot(history, text, target_language):
+    response = txt_model.generate_content(text)
+    translated_text = translate_text(response.text, target_language)
+    history.append((None, translated_text))
+    return history
+
+def handle_rag_gpt(history, text,pdf_path, target_language):
+    try:
+        if not pdf_path:
+            history.append((None, translate_text("Please upload a PDF or DOC for RAG-Chatbot functionality.",target_language)))
+        else:
+            persist_directory = mkdtemp()
+            upload_loader_func(pdf_path,persist_directory)
+           
+            articulation_messages, context_sources = articulation_messages_func(text,persist_directory)
+            response = txt_model.generate_content(f"{articulation_messages}")
+            bert = evaluate.load("bertscore")
+            bert_score = bert.compute(predictions=[response.text], references=[text],model_type="distilbert-base-uncased")
+            response = response.text + "\n\n bert Score: " + str(bert_score) + "\n Sources: \n" + context_sources
+            # response = txt_model.generate_content(f"{text} (RAG-GPT processing not implemented)")
+            translated_text = translate_text(response, target_language)
+            history.append((None, translated_text))
+
+    except Exception as e:
+        history.append((None, f"Error in RAG-GPT processing: {e}"))
+    return history
+
+def handle_web_rag_gpt(history, text, url_path, target_language):
+    try:
+        if not url_path:
+            history.append((None, translate_text("Please upload a URL for Web-RAG-Chatbot functionality.",target_language)))
+        else:
+            persist_directory = mkdtemp()
+            web_upload_loader_func(url_path,persist_directory)
+           
+            articulation_messages, context_sources = articulation_messages_func(text,persist_directory)
+            print(context_sources)
+            print(articulation_messages)
+            response = txt_model.generate_content(f"{articulation_messages}")
+            print(response.text)
+            bert = evaluate.load("bertscore")
+            bert_score = bert.compute(predictions=[response.text], references=[text],model_type="distilbert-base-uncased")
+            response = response.text + "\n\n bert Score: " + str(bert_score) + "\n Sources: \n" + context_sources
+            # response = txt_model.generate_content(f"{text} (RAG-GPT processing not implemented)")
+            translated_text = translate_text(response, target_language)
+            history.append((None, translated_text))
+
+    except Exception as e:
+        history.append((None, f"Error in Web-RAG-GPT processing: {e}"))
+    return history
+
+def handle_vision_chatbot(history, text, img_path, target_language):
+    if img_path:
+        img = PIL.Image.open(img_path)
+        response = vis_model.generate_content([text, img])
+        translated_text = translate_text(response.text, target_language)
+        history.append((None, translated_text))
+    else:
+        history.append((None, translate_text("Please upload an image for Vision-Chatbot functionality.",target_language)))
+    return history
+
+def handle_preloaded_document_generation(history,text,target_language):
+    articulation_messages, context_sources = articulation_messages_func(text,"vectordb1")
+    response = txt_model.generate_content(f"{articulation_messages}")
+    bert = evaluate.load("bertscore")
+    bert_score = bert.compute(predictions=[response.text], references=[text],model_type="distilbert-base-uncased")
+    response = response.text + "\n\n bert Score: " + str(bert_score) + "\n Sources: \n" + context_sources
+    translated_text = translate_text(response, target_language)
+    history.append((None, translated_text))
+    return history
+
+with gr.Blocks() as demo:
+    with gr.Tabs():
+        with gr.TabItem("Multimodal Chatbot"):
+            with gr.Row() as app_row:
+                with gr.Column(scale=1) as left_column:
+                    app_functionality = gr.Dropdown(
+                        label="Chatbot functionality",
+                        choices=["Chatbot", "RAG-GPT", "Vision-Chatbot","Preloaded-Document-Generation", "Web-Rag-GPT"],
+                        value="Chatbot",
+                        interactive=True,
+                    )
+                    language_dropdown = gr.Dropdown(
+                        label="Select Language",
+                        choices=["en", "es", "fr", "de", "zh"],
+                        value="en",
+                        interactive=True,
+                    )
+                    url_box = gr.Textbox(
+                            interactive=True, placeholder="Enter URL", show_label=False
+                        )
+
+                    input_audio_block = gr.Audio(
+                        sources=["microphone"],
+                        label="Submit your query using voice",
+                        waveform_options=gr.WaveformOptions(
+                            waveform_color="#01C6FF",
+                            waveform_progress_color="#0066B4",
+                            skip_length=2,
+                            show_controls=True),
+                    )
+                    audio_submit_btn = gr.Button(value="Submit audio")
+                
+                with gr.Column(scale=8) as right_column:
+                    with gr.Row() as row_one:
+                        with gr.Column(visible=False) as reference_bar:
+                            ref_output = gr.Markdown(label="Reference")
+                        with gr.Column() as chatbot_output:
+                            chatbot = gr.Chatbot(
+                                [],
+                                elem_id="chatbot",
+                                bubble_full_width=False,
+                                height=500,
+                            )
+
+                    with gr.Row():
+                        text_box = gr.Textbox(
+                            interactive=True, placeholder="Enter message or upload file....", show_label=False
+                        )
+
+                    with gr.Row() as row_two:
+                        image_box = gr.Image(type="filepath", label="Upload Image")
+                        pdf_box = gr.File(type="filepath", label="Upload PDF")
+
+                        
+            txt_msg = text_box.submit(
+                fn=add_query_to_history,
+                inputs=[chatbot, text_box, image_box, pdf_box, url_box],
+                outputs=chatbot,
+            ).then(
+                fn=generate_llm_response,
+                inputs=[chatbot, text_box, image_box, pdf_box, language_dropdown, app_functionality,url_box],
+                outputs=chatbot,
+            )
+
+            # audio_submit_btn.click(
+            #     fn=transcribe_audio_to_text,
+            #     inputs=input_audio_block,
+            #     outputs=text_box
+            # ).then(
+            #     fn=add_query_to_history,
+            #     inputs=[chatbot, text_box, image_box, pdf_box],
+            #     outputs=chatbot,
+            # ).then(
+            #     fn=generate_llm_response,
+            #     inputs=[chatbot, text_box, image_box, pdf_box, language_dropdown, app_functionality],
+            #     outputs=chatbot,
+            # )
+
+demo.queue()
+demo.launch(debug=True)
