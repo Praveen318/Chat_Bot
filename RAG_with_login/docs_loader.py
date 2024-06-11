@@ -113,7 +113,7 @@ docs = loader_func()
 def spliter_func(docs):
     # Split
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1500,
+        chunk_size=500,
         chunk_overlap=150
     )
     return text_splitter.split_documents(docs)
